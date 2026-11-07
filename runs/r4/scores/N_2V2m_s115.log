@@ -1,0 +1,8 @@
+/home/mi3dr/projects/airway-canonical-deform/tests/../m2/label_core.py:32: RuntimeWarning: Mean of empty slice
+  with np.errstate(all="ignore"): x = rr - np.nanmean(rr, axis=0)[None]
+/home/mi3dr/projects/airway-canonical-deform/tests/../m2/label_core.py:94: RuntimeWarning: Mean of empty slice
+  arc = np.nanmean(D["x"][:, i, idx], axis=1); cm = np.nanmedian(D["x"][:, i, out], axis=1)
+/home/mi3dr/projects/airway-canonical-deform/tests/../m2/label_core.py:94: RuntimeWarning: All-NaN slice encountered
+  arc = np.nanmean(D["x"][:, i, idx], axis=1); cm = np.nanmedian(D["x"][:, i, out], axis=1)
+N_2V2m_s115    amp 0.00 n 198 | FULL 0.00 -ctrl 0.00 -plat 0.00 -win 0.00 SIG 0.00
+saved runs/r4/scores/N_2V2m_s115.json

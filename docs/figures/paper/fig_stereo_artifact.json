@@ -1,0 +1,54 @@
+{
+ "sequential constant speed": {
+  "n": 10,
+  "position_median": 2.1720139856629537,
+  "position_range": [
+   1.8365672070959176,
+   2.341643928373617
+  ],
+  "velocity_median": 7.4271874725441265,
+  "velocity_range": [
+   7.0906444796853005,
+   8.40529613125807
+  ]
+ },
+ "stop- and-go": {
+  "n": 2,
+  "position_median": 0.4293715383690626,
+  "position_range": [
+   0.33893906255738937,
+   0.5198040141807359
+  ],
+  "velocity_median": 2.8656869800057114,
+  "velocity_range": [
+   2.7242690705873356,
+   3.0071048894240877
+  ]
+ },
+ "scope riding breath": {
+  "n": 2,
+  "position_median": 0.8020882926323709,
+  "position_range": [
+   0.7538251502705845,
+   0.8503514349941573
+  ],
+  "velocity_median": 1.5803784407901713,
+  "velocity_range": [
+   1.4990850092173036,
+   1.661671872363039
+  ]
+ },
+ "phase- gated": {
+  "n": 10,
+  "position_median": 0.8803481519794174,
+  "position_range": [
+   0.7791839077005638,
+   0.9281259974688513
+  ],
+  "velocity_median": 0.14876507693237861,
+  "velocity_range": [
+   0.03743916993858099,
+   0.7855515930204496
+  ]
+ }
+}

@@ -1,0 +1,350 @@
+"""M1 v0 on a real bronchoscopy clip: per-frame short-window depth, canonical wall = time median, deformation = per-frame
+deviation. No ground truth: the test is whether a documented wall event appears as ONE sector moving while the others
+hold (the anatomical prior checked, not imposed), and whether the per-frame CSA(t) shows the event that the rigid map
+cannot.
+
+Geometry is in scene units and expressed relative to the tube radius R (median polar radius over the clip), because a
+single real clip has no scale. Stations are points on the smoothed camera path; for frame k the stations between
+0.8 R and 3.5 R in front of the camera along its viewing axis are measured from that frame's depth map alone.
+
+Usage: python m1/windowed_depth_real.py runs/real_26V2 --out runs/m1_real_26V2 --event 1908 1921 [--window 2] [--gpus 0,1,2,3] [--skip-stereo]
+Env:   BRONCHO_COLMAP (default colmap)"""
+import json, sys, os, json, argparse, subprocess, tempfile
+import numpy as np, cv2
+
+ap = argparse.ArgumentParser(); ap.add_argument("workspace"); ap.add_argument("--out", required=True); ap.add_argument("--model", default="sparse/0"); ap.add_argument("--force-model", action="store_true", help="use --model as given even if it is sparse/0 (skip the largest-model rule)")
+ap.add_argument("--event", type=int, nargs=2, default=None, help="frame range of the documented wall event"); ap.add_argument("--window", type=int, default=2)
+ap.add_argument("--gpus", default="0,1,2,3"); ap.add_argument("--max-size", type=int, default=1600); ap.add_argument("--skip-stereo", action="store_true"); ap.add_argument("--ahead", default="0.8,3.5")
+ap.add_argument("--min-cosang", type=float, default=0.5, help="a frame contributes to a station only if the station lies within acos(this) of the view axis")
+ap.add_argument("--frame", default="global", choices=["global", "transport"], help="the angular reference the sectors are measured against. 'transport' is the original parallel transport, kept only to reproduce earlier results; it rotates with a wandering scope and made a notch at a true -90 deg read as +64 to +75.")
+ap.add_argument("--recentre", action="store_true", help="put each station's sector origin on the LUMEN AXIS (a robust circle fit to that station's pooled wall points) instead of on the camera path; a scope that hugs one wall otherwise makes an eccentric ring whose far side is grazing and sparse")
+ap.add_argument("--radius-from", choices=["rings", "path"], default="rings", help="what the reference radius R means: the median radius of the recentred rings (the lumen), or the median distance from the camera path to the wall. The path estimate is biased low whenever the scope runs off-axis, and every gate downstream is quoted in R.")
+ap.add_argument("--slab", type=float, default=0.10, help="half-thickness of a station's slab, in R")
+ap.add_argument("--pm-extra", default=None, help="extra PatchMatchStereo settings, e.g. 'geom_consistency=false,filter_min_ncc=0.05'")
+ap.add_argument("--pixel-stride", type=int, default=2, help="sample every Nth pixel of each depth map when building the wall points; 1 uses every pixel (4x the points per sector)")
+ap.add_argument("--min-sector-points", type=int, default=3, help="depth points a sector needs before it gets a radius at all (the raw support)")
+ap.add_argument("--support-points", type=int, default=15, help="points a sector needs to be TRUSTED"); ap.add_argument("--support-mad", type=float, default=0.12, help="max spread (MAD of the sector's radii, in R) for a trusted sector"); ap.add_argument("--support-cos", type=float, default=0.25, help="min |cos| between the view ray and the wall's radial direction: a sector seen edge-on is not measured")
+ap.add_argument("--fill-unsupported", action="store_true", help="old behaviour: fill unmeasured sectors from the canonical when computing area. OFF by default - an unsupported sector is UNKNOWN, never interpolated into motion")
+ap.add_argument("--min-baseline", type=float, default=0.0, help="choose stereo sources by camera-centre distance >= this many median inter-frame steps (within --max-gap frames) instead of the fixed +-window")
+ap.add_argument("--max-gap", type=int, default=12); ap.add_argument("--phase-json", default=None, help="K4 phase gating: JSON {frame: phase_rad}; sources are same-phase frames of neighbouring cycles"); ap.add_argument("--phase-tol", type=float, default=0.35); ap.add_argument("--phase-span", type=int, default=120); ap.add_argument("--texture-gate", type=float, default=0.0, help="drop depth pixels whose 7x7 local image std (grey levels) is below this before the station analysis")
+ap.add_argument("--canonical-frames", type=int, nargs=2, default=None, help="build the canonical wall from this frame range only (e.g. the post-event pullback), falling back to all frames where it has < 5 observations")
+a = ap.parse_args(); os.makedirs(a.out, exist_ok=True); COLMAP = os.environ.get("BRONCHO_COLMAP", "colmap"); dense = f"{a.out}/dense"
+from scipy.ndimage import uniform_filter1d
+from scipy.spatial import cKDTree
+
+
+def sh(cmd):
+    r = subprocess.run([COLMAP] + cmd, capture_output=True, text=True, errors="replace")
+    if r.returncode != 0: raise RuntimeError(cmd[0] + "\n" + r.stderr[-1500:])
+
+
+def read_model(model_dir):
+    with tempfile.TemporaryDirectory() as td:
+        sh(["model_converter", "--input_path", model_dir, "--output_path", td, "--output_type", "TXT"])
+        cams = {}
+        for l in open(f"{td}/cameras.txt"):
+            if l.startswith("#") or not l.strip(): continue
+            f = l.split(); cams[int(f[0])] = (f[1], int(f[2]), int(f[3]), np.array(list(map(float, f[4:]))))
+        imgs = {}; L = [l for l in open(f"{td}/images.txt") if l.strip() and not l.startswith("#")]
+        for l in L[0::2]:
+            f = l.split(); imgs[f[9]] = (np.array(list(map(float, f[1:5]))), np.array(list(map(float, f[5:8]))), int(f[8]))
+        pts = np.array([[float(x) for x in l.split()[1:4]] for l in open(f"{td}/points3D.txt") if l.strip() and not l.startswith("#")])
+    return cams, imgs, pts
+
+
+def q2R(q):
+    w, x, y, z = q
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)], [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)], [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def fidx(n): return int(os.path.splitext(os.path.basename(n))[0].lstrip("f"))
+
+
+def depth_path(dirn, nm):
+    """geometric maps when they exist, photometric otherwise (a run with geom_consistency off writes only photometric)"""
+    g = f"{dirn}/{nm}.geometric.bin"
+    return g if os.path.exists(g) else f"{dirn}/{nm}.photometric.bin"
+def read_depth(path):
+    """COLMAP depth map; returns None for a missing, empty or truncated file (PatchMatch can leave one behind for a reference frame
+    whose sources had no overlap - seen with cross-cycle phase-gated sources on 20-V1) instead of decoding float data as a header."""
+    if not os.path.exists(path) or os.path.getsize(path) < 16: return None
+    with open(path, "rb") as f:
+        hdr = b""
+        while hdr.count(b"&") < 3 and len(hdr) < 64:
+            b = f.read(1)
+            if not b: return None
+            hdr += b
+        try: w, h, c = map(int, hdr.decode("ascii").split("&")[:3])
+        except (UnicodeDecodeError, ValueError): return None
+        data = np.fromfile(f, np.float32)
+        if data.size != w * h * c: return None
+        return data.reshape(h, w, c)[:, :, 0]
+
+
+# ------------------------------------------------------------------ 1. stereo with per-frame windows
+# COLMAP's mapper can leave several sub-models behind, and which one lands in sparse/0 is not deterministic: a rerun
+# of the same clip put a 4-frame stray in sparse/0 and the real 493-frame model in sparse/1. Taking sparse/0 on faith
+# silently analyses the stray. Pick the largest unless the caller named a model explicitly.
+def _pick_model(ws, want):
+    base = os.path.dirname(want) or "sparse"
+    if os.path.isdir(f"{ws}/{want}") and want != "sparse/0": return want          # the caller chose one; respect it
+    subs = sorted(d for d in os.listdir(f"{ws}/{base}") if os.path.isdir(f"{ws}/{base}/{d}")) if os.path.isdir(f"{ws}/{base}") else []
+    if len(subs) <= 1: return want
+    sizes = {}
+    for d in subs:
+        try: _, im, _ = read_model(f"{ws}/{base}/{d}"); sizes[d] = len(im)
+        except Exception: sizes[d] = -1
+    best = max(sizes, key=sizes.get)
+    if f"{base}/{best}" != want:
+        print(f"[model] {len(subs)} sub-models present ({', '.join(f'{d}:{sizes[d]}' for d in subs)}); "
+              f"using the largest, {base}/{best}, not {want}", flush=True)
+    return f"{base}/{best}"
+a.model = a.model if a.force_model else _pick_model(a.workspace, a.model)
+_, imgs0, pts0 = read_model(f"{a.workspace}/{a.model}")
+if not a.skip_stereo:
+    subprocess.run(["rm", "-rf", dense])
+    sh(["image_undistorter", "--image_path", f"{a.workspace}/images", "--input_path", f"{a.workspace}/{a.model}", "--output_path", dense, "--output_type", "COLMAP", "--max_image_size", str(a.max_size)])
+cams, imgs, _ = read_model(f"{dense}/sparse"); names = sorted(imgs, key=fidx); frames = np.array([fidx(n) for n in names]); byidx = {k: n for k, n in zip(frames, names)}
+Rc2w = np.array([q2R(imgs[n][0]).T for n in names]); C = np.array([-q2R(imgs[n][0]).T @ imgs[n][1] for n in names]); N = len(names)
+# depth range from the sparse points as seen from the cameras
+if len(pts0):
+    dep_sparse = np.concatenate([((pts0 - C[j]) @ Rc2w[j][:, 2]) for j in range(0, N, max(1, N // 20))]); dep_sparse = dep_sparse[dep_sparse > 0]
+    dmin, dmax = np.percentile(dep_sparse, 1) * 0.5, np.percentile(dep_sparse, 99) * 1.5
+else: dmin, dmax = 1.0, 200.0          # a pose-only model (e.g. ground-truth poses) has no sparse points; only used to set the stereo depth range
+print(f"{N} frames f{frames.min()}-{frames.max()}; window ±{a.window}; depth range {dmin:.3f}-{dmax:.3f} scene units")
+if not a.skip_stereo:
+    step = float(np.median(np.linalg.norm(np.diff(C, axis=0), axis=1))); Cby = {k: C[j] for j, k in enumerate(frames)}
+    PHASE = {int(k_): float(v_) for k_, v_ in json.load(open(a.phase_json)).items()} if a.phase_json else {}; N_FALLBACK = [0]
+    with open(f"{dense}/stereo/patch-match.cfg", "w") as f:
+        for k, n in zip(frames, names):
+            if a.phase_json:                                                   # K4: same respiratory phase in neighbouring cycles -> the wall is in the same state, stereo is static
+                ph = PHASE.get(int(k))
+                cand = [j for j in range(k - a.phase_span, k + a.phase_span + 1) if j != k and j in byidx and int(j) in PHASE and ph is not None
+                        and abs(((PHASE[int(j)] - ph + np.pi) % (2 * np.pi)) - np.pi) <= a.phase_tol and abs(j - k) > a.max_gap
+                        and np.linalg.norm(Cby[j] - Cby[k]) >= a.min_baseline * step]
+                src = [byidx[j] for j in sorted(cand, key=lambda j: abs(j - k))[:6]]
+                if len(src) < 2:                                                 # fall back to the sequential rule when a cycle neighbour is missing
+                    cand = [j for j in range(k - a.max_gap, k + a.max_gap + 1) if j != k and j in byidx and np.linalg.norm(Cby[j] - Cby[k]) >= a.min_baseline * step]
+                    src = [byidx[j] for j in sorted(cand, key=lambda j: abs(j - k))[:6]]; N_FALLBACK[0] += 1
+            elif a.min_baseline > 0:
+                cand = [j for j in range(k - a.max_gap, k + a.max_gap + 1) if j != k and j in byidx and np.linalg.norm(Cby[j] - Cby[k]) >= a.min_baseline * step]
+                src = [byidx[j] for j in sorted(cand, key=lambda j: abs(j - k))[:6]]
+            else: src = [byidx[j] for j in range(k - a.window, k + a.window + 1) if j != k and j in byidx]
+            if not src: src = [byidx[frames[np.argsort(np.abs(frames - k))[1]]]]
+            f.write(n + "\n" + ", ".join(src) + "\n")
+    if a.phase_json: print(f"phase-gated sources: {N - N_FALLBACK[0]}/{N} reference frames had >= 2 same-phase cycle neighbours (tol {a.phase_tol} rad, span {a.phase_span}); {N_FALLBACK[0]} fell back to sequential")
+    pm = {"geom_consistency": "true", "max_image_size": str(a.max_size), "gpu_index": a.gpus, "depth_min": f"{dmin:.5f}", "depth_max": f"{dmax:.5f}",
+          "filter_min_triangulation_angle": "0.25", "filter_min_num_consistent": "2", "window_radius": "7"}
+    for kv in (a.pm_extra.split(",") if a.pm_extra else []): k_, v_ = kv.split("="); pm[k_.strip()] = v_.strip()      # overrides, never duplicates
+    sh(["patch_match_stereo", "--workspace_path", dense, "--workspace_format", "COLMAP"] + [x for k_, v_ in pm.items() for x in (f"--PatchMatchStereo.{k_}", v_)])
+    print("patch-match stereo done", flush=True)
+
+# ------------------------------------------------------------------ 2. centreline (smoothed camera path) and stations
+Cs = uniform_filter1d(C, size=min(15, N // 4 * 2 + 1), axis=0, mode="nearest")
+seg = np.linalg.norm(np.diff(Cs, axis=0), axis=1); arc = np.concatenate([[0], np.cumsum(seg)]); L_path = arc[-1]
+# first pass: tube radius R from all frames' points (distance from the path)
+depth_dir = f"{dense}/stereo/depth_maps"; sample_r = []
+tree_path = cKDTree(Cs)
+for j in range(0, N, max(1, N // 12)):
+    fp = depth_path(depth_dir, names[j])
+    if not os.path.exists(fp): continue
+    dep = read_depth(fp)
+    if dep is None: print(f"  ! unreadable depth map {fp}, frame skipped", flush=True); continue
+    model, W, H, prm = cams[imgs[names[j]][2]]; fx, fy, cx, cy = prm[:4]; h_, w_ = dep.shape; sx, sy = w_ / W, h_ / H
+    v, u = np.mgrid[0:h_:4, 0:w_:4]; d_ = dep[::4, ::4]; ok = d_ > 0
+    Xc = np.stack([(u[ok] - cx * sx) / (fx * sx) * d_[ok], (v[ok] - cy * sy) / (fy * sy) * d_[ok], d_[ok]], 1); Xw = (Rc2w[j] @ Xc.T).T + C[j]
+    dist, idx = tree_path.query(Xw); inside = (idx > 2) & (idx < N - 3); sample_r.append(dist[inside])
+R = float(np.median(np.concatenate(sample_r))); print(f"tube radius estimate R = {R:.4f} scene units; path length {L_path / R:.1f} R")
+# extend the path straight along its end tangents so that stations exist ahead of the first (and last) cameras: on a
+# withdrawal the camera looks at wall the path never reaches
+ext = 4.0 * R; nb_ = min(10, N - 1)
+ax0 = Rc2w[:nb_, :, 2].mean(0); ax0 /= np.linalg.norm(ax0); ax1 = Rc2w[-nb_:, :, 2].mean(0); ax1 /= np.linalg.norm(ax1)       # where the first / last cameras look
+body0 = Cs[min(N - 1, 30)] - Cs[0]; body1 = Cs[max(0, N - 31)] - Cs[-1]                                                         # direction into the path body from each end
+pre = [Cs[0] + ext * ax0] if (ax0 @ body0) < 0.3 * np.linalg.norm(body0) else []                                                # extend only where the view leaves the path
+post = [Cs[-1] + ext * ax1] if (ax1 @ body1) < 0.3 * np.linalg.norm(body1) else []
+Cs = np.vstack(pre + [Cs] + post); seg = np.linalg.norm(np.diff(Cs, axis=0), axis=1); arc = np.concatenate([[0], np.cumsum(seg)]); L_path = arc[-1]
+print(f"path extended at start: {bool(pre)}, at end: {bool(post)} (along the mean viewing axis of the end frames)")
+ds = 0.2 * R; s_st = np.arange(0, L_path, ds); S = np.stack([np.interp(s_st, arc, Cs[:, i]) for i in range(3)], 1)
+T = np.gradient(S, axis=0); T /= np.linalg.norm(T, axis=1, keepdims=True)
+# The angular frame the sectors are measured in. Parallel transport was the original choice and it is wrong for a
+# wandering scope: the station path is the smoothed camera path, so the path is a helix, its tangent circles, and
+# the frame rotates with it. On a synthetic helix of 0.3 R the transported frame turns 107 deg over the path; a
+# fixed reference projected into each station's plane turns 19. See m2/station_frame.py.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "m2"))
+from station_frame import station_frame as _station_frame
+N1, N2 = _station_frame(S, method=a.frame)
+from station_frame import frame_rotation as _frame_rotation
+_rot = _frame_rotation(S, a.frame)
+print(f"sector frame: {a.frame}; it turns {np.sum(_rot):.0f} deg in total over the path "
+      f"(max {_rot.max():.0f} deg between stations) - an angle is only comparable along the airway if this is small", flush=True)
+# Does the path actually traverse the airway, or does it double back? The station model assumes a monotone pass: each
+# station is a distinct place, visited once, with a tangent pointing down the airway. A scope that advances and then
+# withdraws folds the path, and two stations far apart in arclength are then the SAME place with opposite tangents -
+# which flips their angular frame relative to each other. This is a property of the capture, not of the estimator, so
+# it is reported rather than repaired, and it decides whether angles may be compared ALONG the airway.
+_axis = T.mean(0); _axis /= np.linalg.norm(_axis)
+_tilt = np.degrees(np.arccos(np.clip(T @ _axis, -1, 1)))
+_along = S @ _axis; _mono = float(np.mean(np.diff(_along) > 0))
+_rev = int((_tilt > 90).sum())
+print(f"path monotonicity: {100 * _mono:.0f} % of steps advance along the mean axis; {_rev}/{len(S)} stations have a "
+      f"REVERSED tangent (> 90 deg off axis); median tilt {np.median(_tilt):.0f} deg, max {_tilt.max():.0f} deg"
+      + ("" if _rev == 0 else "  <-- the path doubles back; angles are comparable WITHIN a station but not along the airway"), flush=True)
+lo_a, hi_a = [float(x) * R for x in a.ahead.split(",")]; nS, nb = len(S), 36
+r_grid = np.full((N, nS, nb), np.nan); csa_free = np.full((N, nS), np.nan); PTS = {}; CENTRE = np.zeros((nS, 2))
+n_grid = np.zeros((N, nS, nb), np.int32); mad_grid = np.full((N, nS, nb), np.nan); cos_grid = np.full((N, nS, nb), np.nan)   # per-sector support: points, radial spread, viewing incidence
+for j in range(N):
+    fp = depth_path(depth_dir, names[j])
+    if not os.path.exists(fp): continue
+    dep = read_depth(fp)
+    if dep is None: print(f"  ! unreadable depth map {fp}, frame skipped", flush=True); continue
+    model, W, H, prm = cams[imgs[names[j]][2]]; fx, fy, cx, cy = prm[:4]; h_, w_ = dep.shape; sx, sy = w_ / W, h_ / H
+    if a.texture_gate > 0:
+        gimg = cv2.imread(f"{dense}/images/{names[j]}", cv2.IMREAD_GRAYSCALE)
+        if gimg is not None:
+            gimg = cv2.resize(gimg, (w_, h_)).astype(np.float32); mu_ = cv2.blur(gimg, (7, 7)); tex_ = np.sqrt(np.maximum(cv2.blur(gimg * gimg, (7, 7)) - mu_ * mu_, 0)); dep = np.where(tex_ >= a.texture_gate, dep, 0.0)
+    ps = a.pixel_stride; v, u = np.mgrid[0:h_:ps, 0:w_:ps]; d_ = dep[::ps, ::ps]; ok = d_ > 0
+    Xc = np.stack([(u[ok] - cx * sx) / (fx * sx) * d_[ok], (v[ok] - cy * sy) / (fy * sy) * d_[ok], d_[ok]], 1); Xw = (Rc2w[j] @ Xc.T).T + C[j]
+    axis = Rc2w[j][:, 2]; i_c = int(np.argmin(np.linalg.norm(S - C[j], axis=1)))                      # closest path station to the camera
+    sgn = 1.0 if (T[i_c] @ axis) >= 0 else -1.0                                                          # which way along the path the camera looks
+    along = sgn * (s_st - s_st[i_c]); rel_S = S - C[j]; cosang = (rel_S @ axis) / (np.linalg.norm(rel_S, axis=1) + 1e-9)
+    for i in np.where((along >= lo_a) & (along <= hi_a) & (cosang > a.min_cosang))[0]:                            # ahead along the path, within ~60 deg of the view axis
+        rel = Xw - S[i]; along = rel @ T[i]; Q = rel[np.abs(along) < a.slab * R]
+        if len(Q) < 60: continue
+        x, y = Q @ N1[i], Q @ N2[i]
+        nn = cKDTree(np.stack([x, y], 1)).query_ball_point(np.stack([x, y], 1), 0.06 * R, return_length=True); keep = nn >= 4
+        if keep.sum() < 60: continue
+        x, y = x[keep], y[keep]
+        if a.recentre: PTS.setdefault(i, []).append((j, x.astype(np.float32), y.astype(np.float32))); continue
+        ang = np.arctan2(y, x); b = ((ang + np.pi) / (2 * np.pi) * nb).astype(int) % nb; rr = np.hypot(x, y)
+        cnt = np.array([(b == q).sum() for q in range(nb)])
+        rm = np.array([np.median(rr[b == q]) if cnt[q] >= a.min_sector_points else np.nan for q in range(nb)]); r_grid[j, i] = rm; n_grid[j, i] = cnt
+        mad_grid[j, i] = np.array([np.median(np.abs(rr[b == q] - rm[q])) / R if cnt[q] >= a.min_sector_points else np.nan for q in range(nb)])
+        tb_ = (np.arange(nb) + 0.5) / nb * 2 * np.pi - np.pi                                             # how square-on the camera sees each sector
+        er = np.cos(tb_)[:, None] * N1[i][None] + np.sin(tb_)[:, None] * N2[i][None]
+        Pw = S[i][None] + np.where(np.isfinite(rm), rm, np.nanmedian(rm))[:, None] * er; view = Pw - C[j]; view /= (np.linalg.norm(view, axis=1, keepdims=True) + 1e-9)
+        cos_grid[j, i] = np.abs((er * view).sum(1))
+        okb = np.isfinite(rm)
+        if okb.mean() >= 0.75:
+            tb = (np.arange(nb) + 0.5) / nb * 2 * np.pi - np.pi; xx, yy = rm[okb] * np.cos(tb[okb]), rm[okb] * np.sin(tb[okb]); csa_free[j, i] = 0.5 * abs(np.dot(xx, np.roll(yy, -1)) - np.dot(yy, np.roll(xx, -1)))
+if a.recentre:
+    # robust circle fit (Kasa, then trimmed re-fits) to each station's POOLED points: one fixed centre per station, so wall
+    # motion is not absorbed into a moving origin
+    def fit_centre(x, y):
+        cx_, cy_ = 0.0, 0.0
+        for _ in range(4):
+            xx, yy = x - cx_, y - cy_; rr_ = np.hypot(xx, yy); m_ = np.abs(rr_ - np.median(rr_)) < 2.5 * (np.median(np.abs(rr_ - np.median(rr_))) + 1e-6)
+            if m_.sum() < 50: break
+            X_, Y_ = x[m_], y[m_]; A_ = np.stack([2 * X_, 2 * Y_, np.ones(m_.sum())], 1); b_ = X_ ** 2 + Y_ ** 2
+            sol, *_ = np.linalg.lstsq(A_, b_, rcond=None); cx_, cy_ = float(sol[0]), float(sol[1])
+        return cx_, cy_
+    n_rc = 0
+    for i, lst in PTS.items():
+        xs = np.concatenate([p[1] for p in lst]); ys = np.concatenate([p[2] for p in lst])
+        if len(xs) < 300: continue
+        CENTRE[i] = fit_centre(xs, ys); n_rc += 1
+    print(f"re-centred {n_rc} stations on the lumen axis; median offset from the camera path {np.median(np.hypot(*CENTRE[list(PTS)].T)) / R:.2f} R, max {np.max(np.hypot(*CENTRE[list(PTS)].T)) / R:.2f} R")
+    for i, lst in PTS.items():
+        for (j, x, y) in lst:
+            x = x - CENTRE[i][0]; y = y - CENTRE[i][1]; ang = np.arctan2(y, x); b = ((ang + np.pi) / (2 * np.pi) * nb).astype(int) % nb; rr = np.hypot(x, y)
+            cnt = np.array([(b == q).sum() for q in range(nb)])
+            rm = np.array([np.median(rr[b == q]) if cnt[q] >= a.min_sector_points else np.nan for q in range(nb)]); r_grid[j, i] = rm; n_grid[j, i] = cnt
+            mad_grid[j, i] = np.array([np.median(np.abs(rr[b == q] - rm[q])) / R if cnt[q] >= a.min_sector_points else np.nan for q in range(nb)])
+            tb_ = (np.arange(nb) + 0.5) / nb * 2 * np.pi - np.pi
+            er = np.cos(tb_)[:, None] * N1[i][None] + np.sin(tb_)[:, None] * N2[i][None]
+            origin = S[i] + CENTRE[i][0] * N1[i] + CENTRE[i][1] * N2[i]
+            Pw = origin[None] + np.where(np.isfinite(rm), rm, np.nanmedian(rm))[:, None] * er; view = Pw - C[j]; view /= (np.linalg.norm(view, axis=1, keepdims=True) + 1e-9)
+            cos_grid[j, i] = np.abs((er * view).sum(1))
+    PTS.clear()
+seen = np.isfinite(r_grid).any(2); print(f"(frame, station) cells measured: {seen.sum()}; stations observed by >= 5 frames: {(seen.sum(0) >= 5).sum()}/{nS}")
+
+# ------------------------------------------------------------------ 2b. reference radius, measured on the lumen
+# The first-pass R is the median distance from the CAMERA PATH to the wall. When the scope hugs one wall that is not the
+# tube radius: the near wall is closer AND subtends more pixels, so it dominates the median and drags it down. On a
+# synthetic tube of true radius 5.0 the path estimate reads 4.97 on axis but 4.32 at 0.30 R off axis (-13.6 %). Every
+# gate downstream (the 0.04 R standard error, the 0.25 R camera spread) is quoted in R, so that bias silently retunes
+# them by the same amount. The recentred rings measure radius about the lumen axis, which is the quantity we mean by R.
+R_path = R
+if a.radius_from == "rings":
+    # gate on evidence that does NOT depend on R (point count and incidence), or the estimate would be circular: a
+    # sector with three stray points is not a measurement of the wall, and on the real clips most sectors are that.
+    _ok = (n_grid >= a.support_points) & (cos_grid >= a.support_cos) & np.isfinite(r_grid)
+    _rr = np.where(_ok, r_grid, np.nan)
+    with np.errstate(all="ignore"):
+        _rr = np.nanmedian(_rr, axis=0)                                  # per (station, sector), over frames
+        _st = np.nanmedian(_rr, axis=1)                                  # per station, over its sectors
+    _st = _st[np.isfinite(_st)]
+    if len(_st) >= 5:
+        R = float(np.median(_st)); mad_grid *= R_path / R                # mad_grid was already divided by the old R
+        print(f"tube radius from the recentred rings R = {R:.4f} scene units ({100 * (R - R_path) / R_path:+.1f} % vs the camera-path estimate {R_path:.4f})")
+    else:
+        print(f"   ! only {len(_st)} stations carry a ring; keeping the camera-path radius R = {R:.4f}")
+
+# ------------------------------------------------------------------ 3. canonical wall (time median) and deformation
+r_can = np.nanmedian(r_grid, axis=0); n_obs = np.isfinite(r_grid).sum(0); r_can[n_obs < 5] = np.nan
+if a.canonical_frames:
+    cf = (frames >= a.canonical_frames[0]) & (frames <= a.canonical_frames[1]); r_sub = np.nanmedian(r_grid[cf], axis=0); n_sub = np.isfinite(r_grid[cf]).sum(0)
+    use = n_sub >= 5; r_can = np.where(use, r_sub, r_can); print(f"canonical wall from f{a.canonical_frames[0]}-f{a.canonical_frames[1]} on {use.sum()} (station, sector) cells, all-frame fallback on {(~use & np.isfinite(r_can)).sum()}")
+dev = (r_grid - r_can[None]) / R                                   # deformation in units of R (negative = wall moved into the lumen)
+csa_can = np.full(nS, np.nan); tb = (np.arange(nb) + 0.5) / nb * 2 * np.pi - np.pi
+for i in range(nS):
+    okb = np.isfinite(r_can[i])
+    if okb.mean() >= 0.75: xx, yy = r_can[i][okb] * np.cos(tb[okb]), r_can[i][okb] * np.sin(tb[okb]); csa_can[i] = 0.5 * abs(np.dot(xx, np.roll(yy, -1)) - np.dot(yy, np.roll(xx, -1)))
+# per-frame CSA with missing sectors filled from the canonical wall (like-for-like with csa_can)
+csa_fill = np.full((N, nS), np.nan)
+support = (n_grid >= a.support_points) & (mad_grid <= a.support_mad) & (cos_grid >= a.support_cos) & np.isfinite(r_grid)
+print(f"per-sector support: {100*support.mean():.0f} % of all (frame, station, sector) cells trusted; of the cells with a radius at all, {100*support.sum()/max(np.isfinite(r_grid).sum(),1):.0f} %")
+for j in range(N):
+    for i in np.where(seen[j] & np.isfinite(csa_can))[0]:
+        sup = support[j, i]
+        rr = np.where(sup, r_grid[j, i], r_can[i] if a.fill_unsupported else np.nan); okb = np.isfinite(rr)
+        if okb.mean() >= 0.75 and sup.mean() >= 0.5: xx, yy = rr[okb] * np.cos(tb[okb]), rr[okb] * np.sin(tb[okb]); csa_fill[j, i] = 0.5 * abs(np.dot(xx, np.roll(yy, -1)) - np.dot(yy, np.roll(xx, -1)))
+ratio = csa_fill / csa_can[None]
+res = dict(workspace=a.workspace, frames=[int(frames.min()), int(frames.max())], n_frames=int(N), window=a.window, R_scene=R, n_stations=int(nS), cells=int(seen.sum()),
+           csa_ratio_median_all=float(np.nanmedian(ratio)), csa_ratio_iqr_all=[float(np.nanpercentile(ratio, 25)), float(np.nanpercentile(ratio, 75))],
+           dev_R_iqr_all=[float(np.nanpercentile(dev, 25)), float(np.nanpercentile(dev, 75))])
+if a.event:
+    ev = (frames >= a.event[0]) & (frames <= a.event[1]); pre = (frames < a.event[0]) & (frames >= a.event[0] - 60); post = (frames > a.event[1]) & (frames <= a.event[1] + 60)
+    # which stations see the event, and in which sector does the wall move?
+    dev_ev = np.nanmean(dev[ev], axis=0); dev_out = np.nanmean(dev[pre | post], axis=0)      # (nS, nb)
+    diff = dev_ev - dev_out; score = np.nanmin(diff, axis=1)                                  # most inward-moving sector per station
+    good = np.where(np.isfinite(score) & (np.isfinite(r_grid[ev]).any(2).sum(0) >= 3))[0]
+    if len(good):
+        i_best = int(good[np.argmin(score[good])]); b_best = int(np.nanargmin(diff[i_best])); d_row = diff[i_best]
+        moving = np.isfinite(d_row) & (d_row < -0.1); still = np.isfinite(d_row) & (np.abs(d_row) < 0.05)
+        res["event"] = dict(frames=a.event, n_event_frames_registered=int(ev.sum()), station_index=i_best, station_arclength_R=float(s_st[i_best] / R), moving_sector_deg=float(tb[b_best] * 180 / np.pi),
+                            moving_sector_inward_R=float(d_row[b_best]), n_sectors_moving_gt_0p1R=int(moving.sum()), n_sectors_still_lt_0p05R=int(still.sum()), n_sectors_valid=int(np.isfinite(d_row).sum()),
+                            csa_ratio_event_min=float(np.nanmin(ratio[ev][:, i_best])) if np.isfinite(ratio[ev][:, i_best]).any() else None,
+                            csa_ratio_pre_median=float(np.nanmedian(ratio[pre][:, i_best])) if np.isfinite(ratio[pre][:, i_best]).any() else None,
+                            csa_ratio_post_median=float(np.nanmedian(ratio[post][:, i_best])) if np.isfinite(ratio[post][:, i_best]).any() else None,
+                            stations_with_event_signal=[int(i) for i in good if score[i] < -0.15])
+        print("event:", json.dumps(res["event"]))
+json.dump(res, open(f"{a.out}/m1_real_result.json", "w"), indent=1)
+np.savez_compressed(f"{a.out}/m1_real_grid.npz", frames=frames, s_st=s_st, R=R, R_path=R_path, tangent_tilt=_tilt, path_monotone=_mono, n_reversed=_rev, radius_from=a.radius_from, r_grid=r_grid, r_can=r_can, dev=dev, csa_fill=csa_fill, csa_can=csa_can, csa_free=csa_free, C=C, S=S,
+                    n_grid=n_grid, mad_grid=mad_grid, cos_grid=cos_grid, support=support, support_params=np.array([a.support_points, a.support_mad, a.support_cos]), centre=CENTRE, recentred=bool(a.recentre), N1=N1, N2=N2, frame=a.frame)
+print({k: v for k, v in res.items() if k != "event"})
+
+# ------------------------------------------------------------------ 4. figure
+import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt, cv2
+fig, axs = plt.subplots(2, 2, figsize=(15, 9))
+ax = axs[0, 0]
+if a.event and "event" in res:
+    ib = res["event"]["station_index"]; picks = [i for i in (ib - 4, ib - 2, ib, ib + 2, ib + 4) if 0 <= i < nS]
+    for i in picks: ax.plot(frames, ratio[:, i], ".-", ms=3, lw=.8, label=f"station {s_st[i] / R:.1f} R")
+    ax.axvspan(a.event[0], a.event[1], color="tab:red", alpha=.15, label="documented event")
+else:
+    for i in range(0, nS, max(1, nS // 5)): ax.plot(frames, ratio[:, i], ".-", ms=3, lw=.8, label=f"station {s_st[i] / R:.1f} R")
+ax.axhline(1, color="k", lw=1); ax.set_xlabel("frame"); ax.set_ylabel("CSA(t) / canonical CSA"); ax.set_title("per-frame lumen area relative to the canonical wall"); ax.legend(fontsize=7); ax.grid(alpha=.3)
+ax = axs[0, 1]
+if a.event and "event" in res:
+    m = ax.imshow(dev[:, ib, :].T, aspect="auto", origin="lower", extent=[frames.min(), frames.max(), -180, 180], cmap="RdBu", vmin=-0.6, vmax=0.6); plt.colorbar(m, ax=ax, label="wall deviation from canonical (R)")
+    ax.axvline(a.event[0], color="k", ls="--"); ax.axvline(a.event[1], color="k", ls="--"); ax.set_xlabel("frame"); ax.set_ylabel("sector (deg)"); ax.set_title(f"deformation field at station {s_st[ib] / R:.1f} R")
+ax = axs[1, 0]
+if a.event and "event" in res:
+    d_row = np.nan_to_num(np.nanmean(dev[ev], 0)[ib] - np.nanmean(dev[pre | post], 0)[ib]); ax.bar(tb * 180 / np.pi, d_row, width=9, color=np.where(d_row < -0.1, "tab:red", "0.6"))
+    ax.set_xlabel("sector (deg)"); ax.set_ylabel("event minus baseline deviation (R)"); ax.set_title("which part of the wall moved during the event"); ax.grid(alpha=.3)
+ax = axs[1, 1]; ax.set_axis_off()
+if a.event:
+    k_ev = frames[ev][len(frames[ev]) // 2] if ev.any() else None
+    fp = f"{a.workspace}/images/{byidx.get(k_ev, names[N // 2])}" if k_ev is not None else f"{a.workspace}/images/{names[N // 2]}"
+    if os.path.exists(fp): ax.imshow(cv2.cvtColor(cv2.imread(fp), cv2.COLOR_BGR2RGB)); ax.set_title(f"frame {k_ev if k_ev is not None else fidx(names[N // 2])} (event)" if k_ev is not None else "mid frame", fontsize=9)
+fig.suptitle(f"M1 v0 on real video — {os.path.basename(a.workspace)} (window ±{a.window}, poses from relaxed rigid SfM)", fontweight="bold"); fig.tight_layout(); fig.savefig(f"{a.out}/m1_real.png", dpi=110); print("figure:", f"{a.out}/m1_real.png")

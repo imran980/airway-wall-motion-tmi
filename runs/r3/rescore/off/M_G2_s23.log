@@ -1,0 +1,2 @@
+M_G2_s23       amp 0.07 n 198 | FULL 0.01 -ctrl 0.01 -plat 0.02 -win 0.01 SIG 0.02 | FULL T/T* med 4.56 |err| med 0.221 | SIG T/T* med 3.44 |err| med 0.140
+saved runs/r3/rescore/off/M_G2_s23.json

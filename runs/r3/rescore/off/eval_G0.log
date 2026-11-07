@@ -1,0 +1,2 @@
+eval_G0        amp 0.07 n 195 | FULL 0.02 -ctrl 0.02 -plat 0.03 -win 0.04 SIG 0.05 | FULL T/T* med 6.05 |err| med 0.271 | SIG T/T* med 4.67 |err| med 0.202
+saved runs/r3/rescore/off/eval_G0.json

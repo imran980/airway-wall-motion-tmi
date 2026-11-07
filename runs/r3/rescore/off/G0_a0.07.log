@@ -1,0 +1,2 @@
+G0_a0.07       amp 0.07 n 195 | FULL 0.01 -ctrl 0.01 -plat 0.02 -win 0.01 SIG 0.02 | FULL T/T* med 4.73 |err| med 0.221 | SIG T/T* med 5.09 |err| med 0.244
+saved runs/r3/rescore/off/G0_a0.07.json

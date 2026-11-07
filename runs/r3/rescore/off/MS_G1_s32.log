@@ -1,0 +1,2 @@
+MS_G1_s32      amp 0.07 n 196 | FULL 0.01 -ctrl 0.01 -plat 0.01 -win 0.01 SIG 0.01 | FULL T/T* med 1.72 |err| med 0.041 | SIG T/T* med 1.88 |err| med 0.050
+saved runs/r3/rescore/off/MS_G1_s32.json

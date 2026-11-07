@@ -1,0 +1,30 @@
+{
+ "model": "OPENCV",
+ "width": 1920,
+ "height": 1080,
+ "fx": 999.90859,
+ "fy": 997.60831,
+ "cx": 980.85269,
+ "cy": 433.36334,
+ "k1": -0.41186,
+ "k2": 0.21447,
+ "p1": 0.0,
+ "p2": 0.0,
+ "params_colmap": [
+  999.90859,
+  997.60831,
+  980.85269,
+  433.36334,
+  -0.41186,
+  0.21447,
+  0.0,
+  0.0
+ ],
+ "rms": 0.259,
+ "board": [
+  14,
+  13
+ ],
+ "n_views": 52,
+ "provenance": "from bronchotrust/runs/own_data/retry/2-V1_intrinsics.json. The New-broncho folder has NO calibration video for 2-V1, unlike every other patient there. These intrinsics match the session A session's optics (lit-circle centre 977,401 vs cx,cy 981,433 - 33 px; the three other 2-V1 sessions are 100+ px off, and the OLD-cohort 2-V1 is 134 px off). Implied HFOV 98.2 deg, inside the project's 97-99 band. Treat the 33 px as a residual uncertainty."
+}

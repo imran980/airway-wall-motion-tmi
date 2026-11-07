@@ -1,0 +1,2 @@
+eval_G1sg      amp 0.07 n 188 | FULL 0.02 -ctrl 0.03 -plat 0.02 -win 0.02 SIG 0.04 | FULL T/T* med 1.70 |err| med 0.042 | SIG T/T* med 1.96 |err| med 0.058
+saved runs/r3/rescore/orig/eval_G1sg.json

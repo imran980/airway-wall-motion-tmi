@@ -1,0 +1,198 @@
+{
+ "clinical": {
+  "2-V2": {
+   "c": 0.023423907883546074,
+   "q": -0.012048350277213087,
+   "q_over_c": 0.5143612388296809,
+   "pose_retention": 0.6407702430474153,
+   "rule": true,
+   "rule_with_camera_check": false
+  },
+  "2-V2 rec B": {
+   "c": 0.024900400621544624,
+   "q": -0.0027657145424445076,
+   "q_over_c": 0.11107108614355075,
+   "pose_retention": 0.7683799170268591,
+   "rule": true,
+   "rule_with_camera_check": true
+  },
+  "20-V1 wd": {
+   "c": 0.04020255084944068,
+   "q": -0.01684858106086981,
+   "q_over_c": 0.41909233879133856,
+   "pose_retention": -0.4528757537878819,
+   "rule": true,
+   "rule_with_camera_check": false
+  },
+  "20-V1 ins": {
+   "c": -0.04125622026592905,
+   "q": -0.02482065138997365,
+   "q_over_c": 0.6016220397793319,
+   "pose_retention": 3.227977185360437,
+   "rule": false,
+   "rule_with_camera_check": false
+  },
+  "18-V1": {
+   "c": 0.01380201584423215,
+   "q": 0.003259306558931925,
+   "q_over_c": 0.23614713935384926,
+   "pose_retention": 0.7080187773930301,
+   "rule": false,
+   "rule_with_camera_check": false
+  },
+  "7-V1": {
+   "c": 0.018881769127432165,
+   "q": -0.031300640669426304,
+   "q_over_c": 1.6577175824034158,
+   "pose_retention": 0.22458871487733933,
+   "rule": false,
+   "rule_with_camera_check": false
+  },
+  "33-V1 wd": {
+   "c": -0.0018039483188740126,
+   "q": 0.017849009490369345,
+   "q_over_c": 9.894412885126515,
+   "pose_retention": 1.5627321815480955,
+   "rule": false,
+   "rule_with_camera_check": false
+  },
+  "26-V2": {
+   "c": 0.0034543022962236335,
+   "q": 0.025403525079920577,
+   "q_over_c": 7.35416964163577,
+   "pose_retention": 5.715754767387217,
+   "rule": false,
+   "rule_with_camera_check": false
+  },
+  "31-V1": {
+   "c": 0.024207037240597102,
+   "q": -0.00836481894656834,
+   "q_over_c": 0.3455531903152478,
+   "pose_retention": 6.0952755082174646,
+   "rule": false,
+   "rule_with_camera_check": false
+  },
+  "17-V1 wd": {
+   "c": 0.0003553645399489288,
+   "q": 0.0013273166782338253,
+   "q_over_c": 3.735084762324852,
+   "pose_retention": -2.504633712250267,
+   "rule": false,
+   "rule_with_camera_check": false
+  },
+  "2-V1": {
+   "c": 0.010459940399608082,
+   "q": 0.007500772786686606,
+   "q_over_c": 0.7170951745544982,
+   "pose_retention": 0.9878008245635487,
+   "rule": false,
+   "rule_with_camera_check": false
+  }
+ },
+ "c3vd": {
+  "clinical 33V1_withdrawal_f1060_f1215": {
+   "n": 121,
+   "rule": 3,
+   "rule_with_camera_check": 3
+  },
+  "clinical 20V1_insertion_f960_f1180": {
+   "n": 56,
+   "rule": 0,
+   "rule_with_camera_check": 0
+  },
+  "clinical 31V1_f320_f580": {
+   "n": 16,
+   "rule": 0,
+   "rule_with_camera_check": 0
+  },
+  "clinical 17V1_withdrawal_f1190_f1310": {
+   "n": 156,
+   "rule": 0,
+   "rule_with_camera_check": 0
+  },
+  "clinical 2V1_sessionB_f3626_f3760": {
+   "n": 142,
+   "rule": 0,
+   "rule_with_camera_check": 0
+  },
+  "periodic P30 duty0.17": {
+   "n": 30,
+   "rule": 0,
+   "rule_with_camera_check": 0
+  },
+  "periodic P30 duty0.8": {
+   "n": 30,
+   "rule": 0,
+   "rule_with_camera_check": 0
+  },
+  "periodic P45 duty0.17": {
+   "n": 45,
+   "rule": 5,
+   "rule_with_camera_check": 2
+  },
+  "periodic P45 duty0.8": {
+   "n": 45,
+   "rule": 4,
+   "rule_with_camera_check": 4
+  },
+  "periodic P52 duty0.17": {
+   "n": 52,
+   "rule": 0,
+   "rule_with_camera_check": 0
+  },
+  "periodic P52 duty0.8": {
+   "n": 52,
+   "rule": 0,
+   "rule_with_camera_check": 0
+  },
+  "periodic P65 duty0.17": {
+   "n": 65,
+   "rule": 0,
+   "rule_with_camera_check": 0
+  },
+  "periodic P65 duty0.8": {
+   "n": 65,
+   "rule": 0,
+   "rule_with_camera_check": 0
+  },
+  "periodic P79 duty0.17": {
+   "n": 79,
+   "rule": 0,
+   "rule_with_camera_check": 0
+  },
+  "periodic P79 duty0.8": {
+   "n": 79,
+   "rule": 0,
+   "rule_with_camera_check": 0
+  },
+  "periodic P134 duty0.17": {
+   "n": 134,
+   "rule": 0,
+   "rule_with_camera_check": 0
+  },
+  "periodic P134 duty0.8": {
+   "n": 134,
+   "rule": 9,
+   "rule_with_camera_check": 0
+  },
+  "ALL": {
+   "n": 1301,
+   "rule": 21,
+   "rule_cam": 9
+  }
+ },
+ "regime": {
+  "2-V2": {
+   "pair_amplitude": 0.08566273720159157,
+   "period": 77.5,
+   "eps_over_beta_median": 0.3760252661241567,
+   "frac_ge_1": 0.16167664670658682
+  },
+  "20-V1 wd": {
+   "pair_amplitude": 0.04799071993190112,
+   "period": 48.0,
+   "eps_over_beta_median": 0.9452030802265828,
+   "frac_ge_1": 0.46579804560260585
+  }
+ }
+}

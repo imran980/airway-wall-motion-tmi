@@ -48,4 +48,8 @@ Python 3.11 with `numpy<2`, `scipy`, `opencv-python`, `matplotlib`, `pycolmap`, 
 
 ## License and citation
 
-License: to be set by the authors before public release. Citation: see the manuscript.
+Released under the MIT License (see `LICENSE`). Citation: see the manuscript.
+
+## Funding
+
+This work was supported by the GENESIS project.
